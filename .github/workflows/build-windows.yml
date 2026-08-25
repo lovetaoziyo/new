@@ -53,52 +53,50 @@ jobs:
         run: |
           if not exist C:\vcpkg\vcpkg.exe (
             if not exist C:\vcpkg (
-              echo Cloning vcpkg...
               git clone --depth=1 https://github.com/microsoft/vcpkg C:\vcpkg
             )
             cd /d C:\vcpkg
-            echo Bootstrapping vcpkg...
             call bootstrap-vcpkg.bat -disableMetrics
           )
           C:\vcpkg\vcpkg.exe --version
         timeout-minutes: 10
 
-      - name: Install vcpkg dependencies
+      - name: Move aom overlay aside before vcpkg install
+        shell: cmd
+        run: |
+          cd /d %GITHUB_WORKSPACE%\rustdesk
+          if exist res\vcpkg\aom move res\vcpkg\aom res\vcpkg\aom.disabled-cmake4
+          dir res\vcpkg\
+
+      - name: vcpkg install
         shell: cmd
         env:
           VCPKG_ROOT: C:\vcpkg
           VCPKG_DEFAULT_HOST_TRIPLET: x64-windows-static
         run: |
           cd /d %GITHUB_WORKSPACE%\rustdesk
-          REM rustdesk's aom overlay (res/vcpkg/aom/aom-install.diff) breaks on cmake 4.x
-          REM (latest vcpkg bootstrap pulls cmake 4.4.0). Temporarily move aom overlay out
-          REM so vcpkg uses its built-in aom (cmake-4 compatible). Restore after install.
-          if exist res\vcpkg\aom (
-            echo Disabling rustdesk aom overlay (cmake 4.x incompatible)...
-            move res\vcpkg\aom res\vcpkg\aom.disabled-cmake4
-          )
-          echo === vcpkg install (manifest mode from rustdesk/vcpkg.json) ===
+          echo === vcpkg install ===
           C:\vcpkg\vcpkg.exe install --triplet=x64-windows-static --x-install-root=C:\vcpkg\installed
-          set RC=%errorlevel%
-          if exist res\vcpkg\aom.disabled-cmake4 (
-            move res\vcpkg\aom.disabled-cmake4 res\vcpkg\aom
-          )
-          if not %RC%==0 (
-            echo ##[error]vcpkg install failed with exit code %RC%
-            exit /b %RC%
-          )
-          REM Sanity check: ffmpeg headers must be present in target triplet dir
-          if not exist C:\vcpkg\installed\x64-windows-static\include\libavutil\attributes.h (
-            echo ##[error]FATAL: ffmpeg headers missing
-            echo installed triplets:
-            dir C:\vcpkg\installed\
-            if exist C:\vcpkg\installed\x64-windows-static\include (
-              dir C:\vcpkg\installed\x64-windows-static\include\
-            )
-            exit /b 1
-          )
-          echo === vcpkg install OK, ffmpeg headers verified ===
         timeout-minutes: 90
+
+      - name: Restore aom overlay
+        if: always()
+        shell: cmd
+        run: |
+          cd /d %GITHUB_WORKSPACE%\rustdesk
+          if exist res\vcpkg\aom.disabled-cmake4 move res\vcpkg\aom.disabled-cmake4 res\vcpkg\aom
+
+      - name: Verify ffmpeg headers
+        shell: cmd
+        run: |
+          if not exist C:\vcpkg\installed\x64-windows-static\include\libavutil\attributes.h goto :no_ffmpeg
+          echo === ffmpeg headers OK ===
+          exit /b 0
+          :no_ffmpeg
+          echo ##[error]FATAL ffmpeg headers missing
+          dir C:\vcpkg\installed\
+          if exist C:\vcpkg\installed\x64-windows-static\include dir C:\vcpkg\installed\x64-windows-static\include
+          exit /b 1
 
       - name: Install flutter_rust_bridge_codegen
         shell: cmd
@@ -119,24 +117,21 @@ jobs:
           set PATH=%USERPROFILE%\.cargo\bin;%PATH%
           flutter_rust_bridge_codegen --rust-input ../src/flutter_ffi.rs --dart-output ./lib/generated_bridge.dart --c-output ./windows/runner/bridge_generated.h
 
-      - name: Build RustDesk (portable + flutter + hwcodec + vram)
+      - name: Build RustDesk
         shell: cmd
         env:
           VCPKG_ROOT: C:\vcpkg
         run: |
           cd /d %GITHUB_WORKSPACE%\rustdesk
-          echo === Starting cargo build ===
+          echo === cargo build start ===
           python build.py --portable --flutter --hwcodec --vram --skip-portable-pack
-          if errorlevel 1 (
-            echo ##[error]build.py failed
-            exit /b 1
-          )
-          if not exist flutter\build\windows\x64\runner\Release (
-            echo ##[error]flutter Release dir not found
-            dir flutter\build\windows\x64\runner\
-            exit /b 1
-          )
+          if not exist flutter\build\windows\x64\runner\Release goto :no_release
           move /Y flutter\build\windows\x64\runner\Release rustdesk
+          exit /b 0
+          :no_release
+          echo ##[error]flutter Release dir not found
+          if exist flutter\build\windows\x64\runner dir flutter\build\windows\x64\runner
+          exit /b 1
         timeout-minutes: 120
 
       - name: Download usbmmidd driver
@@ -148,7 +143,6 @@ jobs:
           powershell -Command "Remove-Item -Recurse -Force usbmmidd\Win32"
           powershell -Command "Remove-Item usbmmidd\deviceinstaller64.exe, usbmmidd\deviceinstaller.exe, usbmmidd\usbmmidd.bat"
           move /Y usbmmidd .
-        timeout-minutes: 5
 
       - name: Download printer drivers
         shell: cmd
@@ -162,7 +156,6 @@ jobs:
           move /Y rustdesk_printer_driver_v4-1.4 drivers\RustDeskPrinterDriver
           move /Y printer_driver_adapter.dll .
           del rustdesk_printer_driver.zip printer_driver_adapter.zip
-        timeout-minutes: 5
 
       - name: Build self-extracting single-file portable
         shell: cmd
@@ -172,12 +165,13 @@ jobs:
           cd /d rustdesk\libs\portable
           pip install -r requirements.txt
           python generate.py -f ..\..\rustdesk\ -o . -e ..\..\rustdesk\rustdesk.exe
-          if not exist target\release\rustdesk-portable-packer.exe (
-            echo ##[error]Portable packer build failed
-            exit /b 1
-          )
+          if not exist target\release\rustdesk-portable-packer.exe goto :no_packer
           mkdir %GITHUB_WORKSPACE%\output
           move /Y target\release\rustdesk-portable-packer.exe %GITHUB_WORKSPACE%\output\rustdesk-1.4.9-x86_64.exe
+          exit /b 0
+          :no_packer
+          echo ##[error]Portable packer build failed
+          exit /b 1
         timeout-minutes: 15
 
       - name: Verify output
