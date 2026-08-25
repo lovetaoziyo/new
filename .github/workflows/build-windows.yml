@@ -69,7 +69,8 @@ jobs:
           VCPKG_DEFAULT_HOST_TRIPLET: ${{ env.VCPKG_DEFAULT_HOST_TRIPLET }}
         shell: bash
         run: |
-          $VCPKG_ROOT/vcpkg install --triplet ${{ env.VCPKG_DEFAULT_HOST_TRIPLET }} --x-install-root="$VCPKG_ROOT/installed"
+          cd "$GITHUB_WORKSPACE/rustdesk"
+          $VCPKG_ROOT/vcpkg install --triplet=x64-windows-static --x-install-root="$VCPKG_ROOT/installed"
 
       - name: Install flutter_rust_bridge_codegen
         shell: pwsh
