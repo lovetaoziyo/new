@@ -106,23 +106,23 @@ jobs:
           VCPKG_ROOT: C:\vcpkg
         run: |
           cd /d %GITHUB_WORKSPACE%\rustdesk
-          REM Skipping --hwcodec to avoid ffmpeg/MSVC toolchain compatibility issues; software encoding still works
-          python build.py --flutter --portable
+          REM --skip-portable-pack: avoid building the portable packer (winres issue), use flutter's raw rustdesk.exe
+          python build.py --flutter --portable --skip-portable-pack
         timeout-minutes: 120
 
       - name: List build output
         shell: cmd
         run: |
           cd /d %GITHUB_WORKSPACE%\rustdesk
-          dir rustdesk*.exe
-          dir target\release\rustdesk.exe
+          echo === flutter build output ===
+          dir flutter\build\windows\x64\runner\Release\
+          echo === librustdesk.dll ===
+          dir target\release\librustdesk.dll
 
-      - name: Upload installer artifact
+      - name: Upload installer artifact (flutter output)
         uses: actions/upload-artifact@v4
         with:
-          name: rustdesk-windows-installer
+          name: rustdesk-windows-portable
           path: |
-            rustdesk/rustdesk-*-install.exe
-            rustdesk/rustdesk_portable.exe
-            rustdesk/target/release/rustdesk.exe
+            rustdesk/flutter/build/windows/x64/runner/Release/
           if-no-files-found: error
