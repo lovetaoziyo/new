@@ -5,9 +5,6 @@ on:
   push:
     branches:
       - main
-    tags:
-      - 'v*'
-      - 'rustdesk-*'
 
 jobs:
   build-windows:
@@ -49,32 +46,27 @@ jobs:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           architecture: x64
 
-      - name: Verify cmake (3.x is preinstalled on windows-2022)
-        shell: cmd
-        run: cmake --version
+      - name: Setup vcpkg
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgDirectory: C:\vcpkg
+          doNotCache: false
 
-      - name: Install vcpkg and dependencies (ffmpeg required for hwcodec)
-        shell: cmd
+      - name: Install vcpkg dependencies (driven by rustdesk/vcpkg.json: libvpx libyuv opus aom ffmpeg mfx-dispatch)
         env:
-          VCPKG_DEFAULT_HOST_TRIPLET: x64-windows-static
+          VCPKG_ROOT: C:\vcpkg
+        shell: bash
         run: |
-          if not exist C:\vcpkg\vcpkg.exe (
-            if not exist C:\vcpkg (
-              git clone --depth=1 https://github.com/microsoft/vcpkg C:\vcpkg
-            )
-            cd /d C:\vcpkg
-            call bootstrap-vcpkg.bat -disableMetrics
-          )
-          cd /d %GITHUB_WORKSPACE%\rustdesk
-          echo === vcpkg version ===
-          C:\vcpkg\vcpkg.exe --version
-          echo === Starting vcpkg install (this can take 30-50 min for ffmpeg + aom) ===
-          C:\vcpkg\vcpkg.exe install --classic --triplet=x64-windows-static --overlay-ports=res/vcpkg/libvpx --overlay-ports=res/vcpkg/libyuv --overlay-ports=res/vcpkg/ffmpeg --overlay-ports=res/vcpkg/mfx-dispatch libvpx:x64-windows-static libyuv:x64-windows-static opus:x64-windows-static aom:x64-windows-static ffmpeg:x64-windows-static
-          if errorlevel 1 (
-            echo ##[error]vcpkg install failed
-            exit /b 1
-          )
-          echo === vcpkg install complete ===
+          cd "$GITHUB_WORKSPACE/rustdesk"
+          if ! "$VCPKG_ROOT/vcpkg" install --triplet=x64-windows-static --x-install-root="$VCPKG_ROOT/installed"; then
+            echo "vcpkg install failed, dumping build logs:"
+            find "$VCPKG_ROOT" -name "*.log" | while read -r log; do
+              echo "===== $log ====="
+              tail -n 50 "$log"
+              echo ""
+            done
+            exit 1
+          fi
         timeout-minutes: 60
 
       - name: Install flutter_rust_bridge_codegen
@@ -96,59 +88,57 @@ jobs:
           set PATH=%USERPROFILE%\.cargo\bin;%PATH%
           flutter_rust_bridge_codegen --rust-input ../src/flutter_ffi.rs --dart-output ./lib/generated_bridge.dart --c-output ./windows/runner/bridge_generated.h
 
-      - name: Build RustDesk (full: portable + flutter + hwcodec + vram)
+      - name: Build RustDesk (portable + flutter + hwcodec + vram, full hardware encode)
         shell: cmd
         env:
           VCPKG_ROOT: C:\vcpkg
         run: |
           cd /d %GITHUB_WORKSPACE%\rustdesk
-          echo === Starting cargo build (15-25 min) ===
-          python build.py --portable --flutter --hwcodec --vram
+          REM --skip-portable-pack: we do the final single-file pack in a later step via libs/portable/generate.py (data.bin is still generated in flutter build output).
+          python build.py --portable --flutter --hwcodec --vram --skip-portable-pack
           if errorlevel 1 (
             echo ##[error]build.py failed
             exit /b 1
           )
-          if not exist flutter\build\windows\x64\runner\Release\rustdesk.exe (
-            echo ##[error]Build failed - rustdesk.exe not found at flutter\build\windows\x64\runner\Release\rustdesk.exe
-            dir flutter\build\windows\x64\runner\Release\
+          REM Move flutter output to ./rustdesk/ (matches official workflow layout)
+          if exist flutter\build\windows\x64\runner\Release (
+            move /Y flutter\build\windows\x64\runner\Release rustdesk
+          ) else (
+            echo ##[error]flutter Release dir not found
             exit /b 1
           )
-          REM Move flutter output to ./rustdesk/ (mirrors official workflow)
-          move /Y flutter\build\windows\x64\runner\Release rustdesk
-          echo === Cargo build complete ===
         timeout-minutes: 120
 
-      - name: Download usbmmidd driver (USB device redirection)
+      - name: Download usbmmidd driver
         shell: cmd
         run: |
-          cd /d %GITHUB_WORKSPACE%\rustdesk
+          cd /d %GITHUB_WORKSPACE%\rustdesk\rustdesk
           curl -L -o usbmmidd_v2.zip https://github.com/rustdesk-org/rdev/releases/download/usbmmidd_v2/usbmmidd_v2.zip
           powershell -Command "Expand-Archive usbmmidd_v2.zip -DestinationPath ."
           powershell -Command "Remove-Item -Recurse -Force usbmmidd\Win32"
           powershell -Command "Remove-Item usbmmidd\deviceinstaller64.exe, usbmmidd\deviceinstaller.exe, usbmmidd\usbmmidd.bat"
-          move /Y usbmmidd rustdesk
+          move /Y usbmmidd .
         timeout-minutes: 5
 
       - name: Download printer drivers
         shell: cmd
         run: |
-          cd /d %GITHUB_WORKSPACE%\rustdesk
+          cd /d %GITHUB_WORKSPACE%\rustdesk\rustdesk
           curl -L -o rustdesk_printer_driver.zip https://github.com/rustdesk/hbb_common/releases/download/driver/rustdesk_printer_driver_v4-1.4.zip
           curl -L -o printer_driver_adapter.zip https://github.com/rustdesk/hbb_common/releases/download/driver/printer_driver_adapter.zip
-          curl -L -o sha256sums https://github.com/rustdesk/hbb_common/releases/download/driver/sha256sums
+          mkdir drivers
           powershell -Command "Expand-Archive rustdesk_printer_driver.zip -DestinationPath ."
           powershell -Command "Expand-Archive printer_driver_adapter.zip -DestinationPath ."
-          mkdir rustdesk\drivers
-          move /Y rustdesk_printer_driver_v4-1.4 rustdesk\drivers\RustDeskPrinterDriver
-          move /Y printer_driver_adapter.dll rustdesk\
-          rmdir /S /Q rustdesk_printer_driver.zip printer_driver_adapter.zip sha256sums
+          move /Y rustdesk_printer_driver_v4-1.4 drivers\RustDeskPrinterDriver
+          move /Y printer_driver_adapter.dll .
+          del rustdesk_printer_driver.zip printer_driver_adapter.zip
         timeout-minutes: 5
 
-      - name: Build self-extracting single-file portable (.exe)
+      - name: Build self-extracting single-file portable (rustdesk-1.4.9-x86_64.exe)
         shell: cmd
         run: |
           cd /d %GITHUB_WORKSPACE%\rustdesk
-          REM Edit manifest (matches official workflow)
+          REM Strip dpiAware from manifest (matches official workflow)
           sed -i '/dpiAware/d' res\manifest.xml
           cd /d rustdesk\libs\portable
           pip install -r requirements.txt
@@ -161,12 +151,10 @@ jobs:
           move /Y target\release\rustdesk-portable-packer.exe %GITHUB_WORKSPACE%\output\rustdesk-1.4.9-x86_64.exe
         timeout-minutes: 15
 
-      - name: List final output
+      - name: Verify output
         shell: cmd
         run: |
-          echo === Final output dir ===
           dir %GITHUB_WORKSPACE%\output
-          echo === rustdesk.exe ===
           dir %GITHUB_WORKSPACE%\rustdesk\rustdesk\rustdesk.exe
 
       - name: Upload single-file portable
@@ -176,7 +164,7 @@ jobs:
           path: output/rustdesk-1.4.9-x86_64.exe
           if-no-files-found: error
 
-      - name: Upload full release folder (as backup)
+      - name: Upload full release folder (backup, contains data.bin etc)
         uses: actions/upload-artifact@v4
         with:
           name: rustdesk-windows-release-folder
