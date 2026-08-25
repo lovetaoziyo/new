@@ -52,7 +52,7 @@ jobs:
           vcpkgDirectory: C:\vcpkg
           doNotCache: false
 
-      - name: Install vcpkg dependencies (driven by rustdesk/vcpkg.json: libvpx libyuv opus aom ffmpeg mfx-dispatch)
+      - name: "Install vcpkg dependencies (driven by rustdesk vcpkg.json: libvpx libyuv opus aom ffmpeg mfx-dispatch)"
         env:
           VCPKG_ROOT: C:\vcpkg
         shell: bash
