@@ -18,16 +18,8 @@ jobs:
       RUST_VERSION: "1.75.0"
       LLVM_VERSION: "15.0.6"
       FLUTTER_VERSION: "3.24.5"
-      VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
 
     steps:
-      - name: Export GitHub Actions cache environment variables
-        uses: actions/github-script@v7
-        with:
-          script: |
-            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
-            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
-
       - name: Checkout source code (with submodules)
         uses: actions/checkout@v4
         with:
@@ -39,7 +31,7 @@ jobs:
         with:
           version: ${{ env.LLVM_VERSION }}
 
-      - name: Install Rust (with rustfmt for frb code generation)
+      - name: Install Rust (with rustfmt for frb)
         uses: dtolnay/rust-toolchain@1.75.0
         with:
           components: rustfmt
@@ -57,7 +49,7 @@ jobs:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           architecture: x64
 
-      - name: Install vcpkg and dependencies (no ffmpeg/hwcodec, aom from upstream)
+      - name: Install vcpkg and dependencies (partial overlay to avoid broken aom patch)
         shell: cmd
         env:
           VCPKG_DEFAULT_HOST_TRIPLET: x64-windows-static
@@ -68,17 +60,8 @@ jobs:
           cd /d C:\vcpkg
           if not exist vcpkg.exe call bootstrap-vcpkg.bat -disableMetrics
           cd /d %GITHUB_WORKSPACE%\rustdesk
-          REM libvpx and libyuv need RustDesk overlay; opus and aom use upstream vcpkg (RustDesk aom overlay is broken on cmake 4.x)
+          REM Use upstream aom (RustDesk's aom overlay is broken on modern cmake); libvpx/libyuv still use RustDesk overlay
           vcpkg install --classic --triplet=x64-windows-static --overlay-ports=res/vcpkg/libvpx --overlay-ports=res/vcpkg/libyuv libvpx:x64-windows-static libyuv:x64-windows-static opus:x64-windows-static aom:x64-windows-static
-          if errorlevel 1 (
-            echo ##[error]vcpkg install failed
-            exit /b 1
-          )
-          REM Sanity check
-          dir C:\vcpkg\installed\x64-windows-static\include\vpx
-          dir C:\vcpkg\installed\x64-windows-static\include\opus
-          dir C:\vcpkg\installed\x64-windows-static\include\aom
-          dir C:\vcpkg\installed\x64-windows-static\include\libyuv
         timeout-minutes: 45
 
       - name: Install flutter_rust_bridge_codegen
@@ -87,58 +70,95 @@ jobs:
           cd /d %GITHUB_WORKSPACE%\rustdesk
           cargo install flutter_rust_bridge_codegen --version 1.80.1 --features uuid --locked
 
-      - name: Fetch Flutter dependencies (must run BEFORE bridge codegen)
+      - name: Fetch Flutter dependencies
         shell: cmd
         run: |
           cd /d %GITHUB_WORKSPACE%\rustdesk\flutter
           flutter pub get
 
-      - name: Generate flutter_rust_bridge code (run from flutter/ so ffigen finds .dart_tool)
+      - name: Generate flutter_rust_bridge code
         shell: cmd
         run: |
           cd /d %GITHUB_WORKSPACE%\rustdesk\flutter
           set PATH=%USERPROFILE%\.cargo\bin;%PATH%
           flutter_rust_bridge_codegen --rust-input ../src/flutter_ffi.rs --dart-output ./lib/generated_bridge.dart --c-output ./windows/runner/bridge_generated.h
 
-      - name: Build RustDesk
+      - name: Build RustDesk (official command, with hwcodec)
         shell: cmd
         env:
           VCPKG_ROOT: C:\vcpkg
         run: |
           cd /d %GITHUB_WORKSPACE%\rustdesk
-          REM --skip-portable-pack: avoid building the portable packer (winres issue), use flutter's raw rustdesk.exe
-          python build.py --flutter --portable --skip-portable-pack
+          REM Official command from rustdesk/flutter-build.yml: --portable --flutter --skip-portable-pack --hwcodec --vram
+          REM --skip-portable-pack: build the flutter output but skip the single-file pack (we do that in a later step with libs/portable)
+          python build.py --portable --flutter --skip-portable-pack --hwcodec --vram
+          if not exist flutter\build\windows\x64\runner\Release\rustdesk.exe (
+            echo ##[error]Build failed - rustdesk.exe not found
+            exit /b 1
+          )
+          REM Move flutter output to ./rustdesk/ (mirrors official workflow)
+          move /Y flutter\build\windows\x64\runner\Release rustdesk
         timeout-minutes: 120
 
-      - name: List build output
+      - name: Download usbmmidd driver (USB device redirection)
         shell: cmd
         run: |
           cd /d %GITHUB_WORKSPACE%\rustdesk
-          echo === flutter build output ===
-          dir flutter\build\windows\x64\runner\Release\
-          echo === librustdesk.dll ===
-          dir target\release\librustdesk.dll
+          curl -L -o usbmmidd_v2.zip https://github.com/rustdesk-org/rdev/releases/download/usbmmidd_v2/usbmmidd_v2.zip
+          powershell -Command "Expand-Archive usbmmidd_v2.zip -DestinationPath ."
+          powershell -Command "Remove-Item -Recurse -Force usbmmidd\Win32"
+          powershell -Command "Remove-Item usbmmidd\deviceinstaller64.exe, usbmmidd\deviceinstaller.exe, usbmmidd\usbmmidd.bat"
+          move /Y usbmmidd rustdesk
+        timeout-minutes: 5
 
-      - name: Package as NSIS installer
+      - name: Download printer drivers
         shell: cmd
         run: |
-          cd /d %GITHUB_WORKSPACE%
-          REM Copy NSIS script into Release folder so File /r "Release\*.*" picks up everything
-          copy /Y installer\installer.nsi rustdesk\flutter\build\windows\x64\runner\Release\installer.nsi
-          cd /d rustdesk\flutter\build\windows\x64\runner\Release
-          REM Use the preinstalled NSIS on the runner
-          "C:\Program Files (x86)\NSIS\makensis.exe" /V2 installer.nsi
-          if not exist rustdesk-1.4.9-install.exe (
-            echo ##[error]NSIS build failed
+          cd /d %GITHUB_WORKSPACE%\rustdesk
+          curl -L -o rustdesk_printer_driver.zip https://github.com/rustdesk/hbb_common/releases/download/driver/rustdesk_printer_driver_v4-1.4.zip
+          curl -L -o printer_driver_adapter.zip https://github.com/rustdesk/hbb_common/releases/download/driver/printer_driver_adapter.zip
+          curl -L -o sha256sums https://github.com/rustdesk/hbb_common/releases/download/driver/sha256sums
+          powershell -Command "Expand-Archive rustdesk_printer_driver.zip -DestinationPath ."
+          powershell -Command "Expand-Archive printer_driver_adapter.zip -DestinationPath ."
+          mkdir rustdesk\drivers
+          move /Y rustdesk_printer_driver_v4-1.4 rustdesk\drivers\RustDeskPrinterDriver
+          move /Y printer_driver_adapter.dll rustdesk\
+          rmdir /S /Q rustdesk_printer_driver.zip printer_driver_adapter.zip sha256sums
+        timeout-minutes: 5
+
+      - name: Build self-extracting single-file portable (.exe)
+        shell: cmd
+        run: |
+          cd /d %GITHUB_WORKSPACE%\rustdesk
+          REM Edit manifest (matches official workflow)
+          sed -i '/dpiAware/d' res\manifest.xml
+          cd /d rustdesk\libs\portable
+          pip install -r requirements.txt
+          python generate.py -f ..\..\rustdesk\ -o . -e ..\..\rustdesk\rustdesk.exe
+          if not exist target\release\rustdesk-portable-packer.exe (
+            echo ##[error]Portable packer build failed
             exit /b 1
           )
-          move /Y rustdesk-1.4.9-install.exe %GITHUB_WORKSPACE%\rustdesk-1.4.9-install.exe
-          dir %GITHUB_WORKSPACE%\rustdesk-1.4.9-install.exe
-        timeout-minutes: 10
+          mkdir %GITHUB_WORKSPACE%\output
+          move /Y target\release\rustdesk-portable-packer.exe %GITHUB_WORKSPACE%\output\rustdesk-1.4.9-x86_64.exe
+        timeout-minutes: 15
 
-      - name: Upload installer artifact
+      - name: List final output
+        shell: cmd
+        run: |
+          dir %GITHUB_WORKSPACE%\output
+          dir %GITHUB_WORKSPACE%\rustdesk\rustdesk\rustdesk.exe
+
+      - name: Upload single-file portable
         uses: actions/upload-artifact@v4
         with:
-          name: rustdesk-windows-installer
-          path: rustdesk-1.4.9-install.exe
+          name: rustdesk-windows-portable
+          path: output/rustdesk-1.4.9-x86_64.exe
+          if-no-files-found: error
+
+      - name: Upload full release folder (as backup)
+        uses: actions/upload-artifact@v4
+        with:
+          name: rustdesk-windows-release-folder
+          path: rustdesk/rustdesk/
           if-no-files-found: error
