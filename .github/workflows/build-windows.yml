@@ -1,0 +1,153 @@
+name: Build Custom RustDesk for Windows
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+env:
+  LLVM_VERSION: "15.0.6"
+  FLUTTER_VERSION: "3.24.5"
+  VCPKG_COMMIT_ID: "120deac3062162151622ca4860575a33844ba10b"
+  SCITER_RUST_VERSION: "1.75.0"
+  VCPKG_DEFAULT_HOST_TRIPLET: x64-windows-static
+
+jobs:
+  build-windows:
+    runs-on: windows-2022
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install LLVM and Clang
+        uses: KyleMayes/install-llvm-action@v2.0.9
+        with:
+          version: ${{ env.LLVM_VERSION }}
+
+      - name: Install flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: "stable"
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+
+      - name: Replace engine with rustdesk custom flutter engine
+        shell: pwsh
+        run: |
+          flutter precache --windows
+          $engineDir = "C:/hostedtoolcache/windows/flutter/stable-${{ env.FLUTTER_VERSION }}-x64/bin/cache/artifacts/engine/windows-x64-release"
+          New-Item -ItemType Directory -Force -Path $engineDir | Out-Null
+          Invoke-WebRequest -Uri https://github.com/rustdesk/engine/releases/download/main/windows-x64-release.zip -OutFile windows-x64-release.zip
+          Expand-Archive -Path windows-x64-release.zip -DestinationPath windows-x64-release -Force
+          Copy-Item -Recurse -Force windows-x64-release/* $engineDir/
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ env.SCITER_RUST_VERSION }}
+          targets: x86_64-pc-windows-msvc
+          components: "rustfmt"
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          workspaces: rustdesk -> target
+
+      - name: Setup vcpkg with binary cache (rustdesk-pinned commit)
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgDirectory: C:\vcpkg
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
+          doNotCache: false
+
+      - name: Install vcpkg dependencies
+        env:
+          VCPKG_DEFAULT_HOST_TRIPLET: ${{ env.VCPKG_DEFAULT_HOST_TRIPLET }}
+        shell: bash
+        run: |
+          cd "$GITHUB_WORKSPACE/rustdesk"
+          $VCPKG_ROOT/vcpkg install --triplet=x64-windows-static --x-install-root="$VCPKG_ROOT/installed"
+
+      - name: Install flutter_rust_bridge_codegen
+        shell: pwsh
+        run: |
+          cargo install flutter_rust_bridge_codegen --version 1.80.1 --features uuid --locked
+
+      - name: Generate bridge code
+        shell: pwsh
+        run: |
+          Pop-Location
+          Set-Location rustdesk\flutter
+          flutter pub get
+          Pop-Location
+          Set-Location rustdesk
+          $exe = Join-Path $env:USERPROFILE ".cargo\bin\flutter_rust_bridge_codegen.exe"
+          & $exe --rust-input ./src/flutter_ffi.rs --dart-output ./flutter/lib/generated_bridge.dart
+
+      - name: Build rustdesk
+        shell: pwsh
+        run: |
+          Set-Location rustdesk
+          python build.py --portable --hwcodec --flutter --vram --skip-portable-pack
+          if (-not (Test-Path ./flutter/build/windows/x64/runner/Release)) {
+            Write-Error "flutter Release dir not found"
+            dir flutter\build\windows\x64\runner\
+            exit 1
+          }
+          Move-Item -Force ./flutter/build/windows/x64/runner/Release ./rustdesk
+
+      - name: Download usbmmidd driver
+        shell: pwsh
+        run: |
+          Set-Location rustdesk\rustdesk
+          Invoke-WebRequest -Uri https://github.com/rustdesk-org/rdev/releases/download/usbmmidd_v2/usbmmidd_v2.zip -OutFile usbmmidd_v2.zip
+          Expand-Archive usbmmidd_v2.zip -DestinationPath .
+          Remove-Item -Path usbmmidd_v2\Win32 -Recurse
+          Remove-Item -Path "usbmmidd_v2\deviceinstaller64.exe", "usbmmidd_v2\deviceinstaller.exe", "usbmmidd_v2\usbmmidd.bat"
+          Move-Item -Force .\usbmmidd_v2 .
+
+      - name: Download printer drivers
+        shell: pwsh
+        run: |
+          Set-Location rustdesk\rustdesk
+          Invoke-WebRequest -Uri https://github.com/rustdesk/hbb_common/releases/download/driver/rustdesk_printer_driver_v4-1.4.zip -OutFile rustdesk_printer_driver_v4-1.4.zip
+          Invoke-WebRequest -Uri https://github.com/rustdesk/hbb_common/releases/download/driver/printer_driver_adapter.zip -OutFile printer_driver_adapter.zip
+          New-Item -ItemType Directory -Force -Path .\drivers | Out-Null
+          Expand-Archive rustdesk_printer_driver_v4-1.4.zip -DestinationPath .
+          Rename-Item rustdesk_printer_driver_v4-1.4 drivers_temp
+          Expand-Archive printer_driver_adapter.zip -DestinationPath .
+          Move-Item -Force .\drivers_temp .\drivers\RustDeskPrinterDriver
+          Move-Item -Force .\printer_driver_adapter.dll .
+          Remove-Item rustdesk_printer_driver_v4-1.4.zip, printer_driver_adapter.zip, drivers_temp -ErrorAction SilentlyContinue
+
+      - name: Build self-extracting portable (.exe)
+        shell: pwsh
+        run: |
+          Set-Location rustdesk\libs\portable
+          pip install -r requirements.txt
+          python generate.py -f ..\..\rustdesk\ -o . -e ..\..\rustdesk\rustdesk.exe
+          if (-not (Test-Path ./target/release/rustdesk-portable-packer.exe)) {
+            Write-Error "Portable packer build failed"
+            exit 1
+          }
+          New-Item -ItemType Directory -Force -Path ..\..\..\output | Out-Null
+          Copy-Item -Force ./target/release/rustdesk-portable-packer.exe ..\..\..\output\rustdesk-1.4.9-x86_64.exe
+
+      - name: Upload single-file portable
+        uses: actions/upload-artifact@v4
+        with:
+          name: rustdesk-windows-portable
+          path: output/rustdesk-1.4.9-x86_64.exe
+          if-no-files-found: error
+
+      - name: Upload full release folder
+        uses: actions/upload-artifact@v4
+        with:
+          name: rustdesk-windows-release-folder
+          path: rustdesk/rustdesk/
+          if-no-files-found: error
