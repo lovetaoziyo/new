@@ -39,9 +39,13 @@ jobs:
         shell: pwsh
         run: |
           flutter precache --windows
+          $engineDir = 'C:/hostedtoolcache/windows/flutter/stable-${{ env.FLUTTER_VERSION }}-x64/bin/cache/artifacts/engine/windows-x64-release'
+          New-Item -ItemType Directory -Force -Path $engineDir | Out-Null
           Invoke-WebRequest -Uri https://github.com/rustdesk/engine/releases/download/main/windows-x64-release.zip -OutFile windows-x64-release.zip
-          Expand-Archive -Path windows-x64-release.zip -DestinationPath windows-x64-release
-          Move-Item -Force windows-x64-release/* C:/hostedtoolcache/windows/flutter/stable-${{ env.FLUTTER_VERSION }}-x64/bin/cache/artifacts/engine/windows-x64-release/
+          Expand-Archive -Path windows-x64-release.zip -DestinationPath windows-x64-release -Force
+          Copy-Item -Recurse -Force windows-x64-release/* $engineDir/
+          Write-Host "Engine replaced OK"
+          Get-ChildItem $engineDir | Select-Object -First 5
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@v1
