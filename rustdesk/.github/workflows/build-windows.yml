@@ -1,0 +1,55 @@
+name: Build Custom RustDesk for Windows
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-windows:
+    runs-on: windows-2022
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install LLVM and Clang
+        uses: KyleMayes/install-llvm-action@v2.0.9
+        with:
+          version: "15.0.6"
+
+      - name: Install Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: "3.24.5"
+          architecture: x64
+
+      - name: Install vcpkg and dependencies
+        run: |
+          git clone --depth=1 -b 2023.04.15 https://github.com/microsoft/vcpkg C:\vcpkg
+          C:\vcpkg\bootstrap-vcpkg.bat -disableMetrics
+          C:\vcpkg\vcpkg.exe install libvpx:x64-windows-static libyuv:x64-windows-static opus:x64-windows-static aom:x64-windows-static
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@1.75.0
+
+      - name: Build RustDesk
+        env:
+          VCPKG_ROOT: C:\vcpkg
+        run: |
+          python build.py --flutter --hwcodec --portable
+        shell: cmd
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rustdesk-windows-portable
+          path: |
+            rustdesk*.exe
+            target/release/rustdesk.exe
+          if-no-files-found: error

@@ -1,0 +1,129 @@
+name: Build Custom RustDesk for Windows
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+      - 'rustdesk-*'
+
+jobs:
+  build-windows:
+    runs-on: windows-2022
+    timeout-minutes: 180
+
+    env:
+      RUST_VERSION: "1.75.0"
+      LLVM_VERSION: "15.0.6"
+      FLUTTER_VERSION: "3.24.5"
+      VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
+
+    steps:
+      - name: Export GitHub Actions cache environment variables
+        uses: actions/github-script@v7
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+
+      - name: Checkout source code (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Install LLVM
+        uses: KyleMayes/install-llvm-action@v2.0.9
+        with:
+          version: ${{ env.LLVM_VERSION }}
+
+      - name: Install Rust (with rustfmt for frb code generation)
+        uses: dtolnay/rust-toolchain@1.75.0
+        with:
+          components: rustfmt
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          workspaces: rustdesk -> target
+
+      - name: Install Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          architecture: x64
+
+      - name: Install vcpkg and dependencies (no ffmpeg/hwcodec)
+        shell: cmd
+        env:
+          VCPKG_DEFAULT_HOST_TRIPLET: x64-windows-static
+          USE_AOM_391: "1"
+        run: |
+          if not exist C:\vcpkg (
+            git clone --depth=1 https://github.com/microsoft/vcpkg C:\vcpkg
+          )
+          cd /d C:\vcpkg
+          if not exist vcpkg.exe call bootstrap-vcpkg.bat -disableMetrics
+          cd /d %GITHUB_WORKSPACE%\rustdesk
+          REM --classic forces non-manifest mode so we can pick our own packages (skips ffmpeg)
+          vcpkg install --classic --triplet=x64-windows-static --overlay-ports=res/vcpkg libvpx:x64-windows-static libyuv:x64-windows-static opus:x64-windows-static aom:x64-windows-static
+          if errorlevel 1 (
+            echo ##[error]vcpkg install failed
+            exit /b 1
+          )
+          REM Sanity check
+          dir C:\vcpkg\installed\x64-windows-static\include\vpx
+          dir C:\vcpkg\installed\x64-windows-static\include\opus
+          dir C:\vcpkg\installed\x64-windows-static\include\aom
+          dir C:\vcpkg\installed\x64-windows-static\include\libyuv
+        timeout-minutes: 45
+
+      - name: Install flutter_rust_bridge_codegen
+        shell: cmd
+        run: |
+          cd /d %GITHUB_WORKSPACE%\rustdesk
+          cargo install flutter_rust_bridge_codegen --version 1.80.1 --features uuid --locked
+
+      - name: Fetch Flutter dependencies (must run BEFORE bridge codegen)
+        shell: cmd
+        run: |
+          cd /d %GITHUB_WORKSPACE%\rustdesk\flutter
+          flutter pub get
+
+      - name: Generate flutter_rust_bridge code (run from flutter/ so ffigen finds .dart_tool)
+        shell: cmd
+        run: |
+          cd /d %GITHUB_WORKSPACE%\rustdesk\flutter
+          set PATH=%USERPROFILE%\.cargo\bin;%PATH%
+          flutter_rust_bridge_codegen --rust-input ../src/flutter_ffi.rs --dart-output ./lib/generated_bridge.dart --c-output ./windows/runner/bridge_generated.h
+
+      - name: Build RustDesk
+        shell: cmd
+        env:
+          VCPKG_ROOT: C:\vcpkg
+        run: |
+          cd /d %GITHUB_WORKSPACE%\rustdesk
+          REM Skipping --hwcodec to avoid ffmpeg/MSVC toolchain compatibility issues; software encoding still works
+          python build.py --flutter --portable
+        timeout-minutes: 120
+
+      - name: List build output
+        shell: cmd
+        run: |
+          cd /d %GITHUB_WORKSPACE%\rustdesk
+          dir rustdesk*.exe
+          dir target\release\rustdesk.exe
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rustdesk-windows-installer
+          path: |
+            rustdesk/rustdesk-*-install.exe
+            rustdesk/rustdesk_portable.exe
+            rustdesk/target/release/rustdesk.exe
+          if-no-files-found: error
