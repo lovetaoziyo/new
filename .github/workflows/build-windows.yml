@@ -12,7 +12,7 @@ on:
 jobs:
   build-windows:
     runs-on: windows-2022
-    timeout-minutes: 180
+    timeout-minutes: 240
 
     env:
       RUST_VERSION: "1.75.0"
@@ -49,7 +49,21 @@ jobs:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           architecture: x64
 
-      - name: Install vcpkg and dependencies (partial overlay to avoid broken aom patch)
+      - name: Pin cmake 3.x (RustDesk's aom/ffmpeg/mfx-dispatch overlays require cmake <4)
+        shell: cmd
+        run: |
+          if not exist C:\cmake (
+            echo Downloading cmake 3.28.6...
+            curl -L -o cmake.zip https://github.com/Kitware/CMake/releases/download/v3.28.6/cmake-3.28.6-win64-x64.zip
+            powershell -Command "Expand-Archive cmake.zip -DestinationPath C:\"
+            move C:\cmake-3.28.6-win64-x64 C:\cmake
+            del cmake.zip
+          )
+          echo C:\cmake\bin>> %GITHUB_ENV%
+          cmake --version
+        timeout-minutes: 10
+
+      - name: Install vcpkg and dependencies (with ffmpeg for hwcodec)
         shell: cmd
         env:
           VCPKG_DEFAULT_HOST_TRIPLET: x64-windows-static
@@ -60,9 +74,11 @@ jobs:
           cd /d C:\vcpkg
           if not exist vcpkg.exe call bootstrap-vcpkg.bat -disableMetrics
           cd /d %GITHUB_WORKSPACE%\rustdesk
-          REM Use upstream aom (RustDesk's aom overlay is broken on modern cmake); libvpx/libyuv still use RustDesk overlay
-          vcpkg install --classic --triplet=x64-windows-static --overlay-ports=res/vcpkg/libvpx --overlay-ports=res/vcpkg/libyuv libvpx:x64-windows-static libyuv:x64-windows-static opus:x64-windows-static aom:x64-windows-static
-        timeout-minutes: 45
+          REM ffmpeg + hwcodec: ffmpeg provides libavutil/libavcodec headers that hwcodec links against.
+          REM Overlays: libvpx/libyuv/ffmpeg/mfx-dispatch from RustDesk (required for hwcodec build to find headers correctly).
+          REM aom: from vcpkg upstream (RustDesk's aom overlay's aom-install.diff breaks on modern cmake).
+          vcpkg install --classic --triplet=x64-windows-static --overlay-ports=res/vcpkg/libvpx --overlay-ports=res/vcpkg/libyuv --overlay-ports=res/vcpkg/ffmpeg --overlay-ports=res/vcpkg/mfx-dispatch libvpx:x64-windows-static libyuv:x64-windows-static opus:x64-windows-static aom:x64-windows-static ffmpeg:x64-windows-static
+        timeout-minutes: 60
 
       - name: Install flutter_rust_bridge_codegen
         shell: cmd
@@ -83,14 +99,15 @@ jobs:
           set PATH=%USERPROFILE%\.cargo\bin;%PATH%
           flutter_rust_bridge_codegen --rust-input ../src/flutter_ffi.rs --dart-output ./lib/generated_bridge.dart --c-output ./windows/runner/bridge_generated.h
 
-      - name: Build RustDesk (official command, with hwcodec)
+      - name: Build RustDesk (full: portable + flutter + hwcodec + vram)
         shell: cmd
         env:
           VCPKG_ROOT: C:\vcpkg
         run: |
           cd /d %GITHUB_WORKSPACE%\rustdesk
-          REM Official command from rustdesk/flutter-build.yml: --portable --flutter --hwcodec --vram
-          REM Do NOT add --skip-portable-pack: it skips data.bin generation, which bundles the Flutter assets (without it the UI buttons render as blank).
+          REM --hwcodec needs ffmpeg headers from vcpkg (installed above).
+          REM --vram enables GPU video RAM encoding (depends on hwcodec).
+          REM Do NOT add --skip-portable-pack: it skips data.bin, which bundles Flutter assets (without it the UI buttons render as blank).
           python build.py --portable --flutter --hwcodec --vram
           if not exist flutter\build\windows\x64\runner\Release\rustdesk.exe (
             echo ##[error]Build failed - rustdesk.exe not found
