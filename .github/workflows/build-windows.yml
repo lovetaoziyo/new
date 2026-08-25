@@ -63,24 +63,38 @@ jobs:
           C:\vcpkg\vcpkg.exe --version
         timeout-minutes: 10
 
-      - name: Install vcpkg dependencies (manifest mode from rustdesk/vcpkg.json)
+      - name: Install vcpkg dependencies
         shell: cmd
         env:
           VCPKG_ROOT: C:\vcpkg
           VCPKG_DEFAULT_HOST_TRIPLET: x64-windows-static
         run: |
           cd /d %GITHUB_WORKSPACE%\rustdesk
-          echo === vcpkg install (host=TARGET=x64-windows-static, manifest mode) ===
-          C:\vcpkg\vcpkg.exe install --triplet=x64-windows-static --x-install-root=C:\vcpkg\installed
-          if errorlevel 1 (
-            echo ##[error]vcpkg install failed
-            exit /b 1
+          REM rustdesk's aom overlay (res/vcpkg/aom/aom-install.diff) breaks on cmake 4.x
+          REM (latest vcpkg bootstrap pulls cmake 4.4.0). Temporarily move aom overlay out
+          REM so vcpkg uses its built-in aom (cmake-4 compatible). Restore after install.
+          if exist res\vcpkg\aom (
+            echo Disabling rustdesk aom overlay (cmake 4.x incompatible)...
+            move res\vcpkg\aom res\vcpkg\aom.disabled-cmake4
           )
-          REM Sanity check: ffmpeg headers must be present in the target triplet dir
+          echo === vcpkg install (manifest mode from rustdesk/vcpkg.json) ===
+          C:\vcpkg\vcpkg.exe install --triplet=x64-windows-static --x-install-root=C:\vcpkg\installed
+          set RC=%errorlevel%
+          if exist res\vcpkg\aom.disabled-cmake4 (
+            move res\vcpkg\aom.disabled-cmake4 res\vcpkg\aom
+          )
+          if not %RC%==0 (
+            echo ##[error]vcpkg install failed with exit code %RC%
+            exit /b %RC%
+          )
+          REM Sanity check: ffmpeg headers must be present in target triplet dir
           if not exist C:\vcpkg\installed\x64-windows-static\include\libavutil\attributes.h (
-            echo ##[error]FATAL: ffmpeg headers missing at C:\vcpkg\installed\x64-windows-static\include\libavutil\attributes.h
+            echo ##[error]FATAL: ffmpeg headers missing
             echo installed triplets:
             dir C:\vcpkg\installed\
+            if exist C:\vcpkg\installed\x64-windows-static\include (
+              dir C:\vcpkg\installed\x64-windows-static\include\
+            )
             exit /b 1
           )
           echo === vcpkg install OK, ffmpeg headers verified ===
