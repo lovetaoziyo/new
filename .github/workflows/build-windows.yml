@@ -48,25 +48,21 @@ jobs:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           architecture: x64
 
-      - name: Bootstrap vcpkg
+      - name: Bootstrap vcpkg at rustdesk-pinned commit
         shell: cmd
         run: |
           if not exist C:\vcpkg\vcpkg.exe (
             if not exist C:\vcpkg (
-              git clone --depth=1 https://github.com/microsoft/vcpkg C:\vcpkg
+              git clone https://github.com/microsoft/vcpkg C:\vcpkg
             )
             cd /d C:\vcpkg
+            REM Pin to the exact commit rustdesk CI uses (2025.08.27 baseline, cmake 3.x compatible).
+            REM Latest vcpkg requires cmake 4.4.0 which breaks aom 3.11.0 from the 2024 baseline.
+            git checkout 120deac3062162151622ca4860575a33844ba10b
             call bootstrap-vcpkg.bat -disableMetrics
           )
           C:\vcpkg\vcpkg.exe --version
-        timeout-minutes: 10
-
-      - name: Move aom overlay aside before vcpkg install
-        shell: cmd
-        run: |
-          cd /d %GITHUB_WORKSPACE%\rustdesk
-          if exist res\vcpkg\aom move res\vcpkg\aom res\vcpkg\aom.disabled-cmake4
-          dir res\vcpkg\
+        timeout-minutes: 15
 
       - name: vcpkg install
         shell: cmd
@@ -78,13 +74,6 @@ jobs:
           echo === vcpkg install ===
           C:\vcpkg\vcpkg.exe install --triplet=x64-windows-static --x-install-root=C:\vcpkg\installed
         timeout-minutes: 90
-
-      - name: Restore aom overlay
-        if: always()
-        shell: cmd
-        run: |
-          cd /d %GITHUB_WORKSPACE%\rustdesk
-          if exist res\vcpkg\aom.disabled-cmake4 move res\vcpkg\aom.disabled-cmake4 res\vcpkg\aom
 
       - name: Verify ffmpeg headers
         shell: cmd
