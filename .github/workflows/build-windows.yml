@@ -15,6 +15,8 @@ jobs:
       RUST_VERSION: "1.75.0"
       LLVM_VERSION: "15.0.6"
       FLUTTER_VERSION: "3.24.5"
+      VCPKG_ROOT: C:\vcpkg
+      VCPKG_DEFAULT_HOST_TRIPLET: x64-windows-static
 
     steps:
       - name: Checkout source code (with submodules)
@@ -46,28 +48,43 @@ jobs:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           architecture: x64
 
-      - name: Setup vcpkg
-        uses: lukka/run-vcpkg@v11
-        with:
-          vcpkgDirectory: C:\vcpkg
-          doNotCache: false
+      - name: Bootstrap vcpkg
+        shell: cmd
+        run: |
+          if not exist C:\vcpkg\vcpkg.exe (
+            if not exist C:\vcpkg (
+              echo Cloning vcpkg...
+              git clone --depth=1 https://github.com/microsoft/vcpkg C:\vcpkg
+            )
+            cd /d C:\vcpkg
+            echo Bootstrapping vcpkg...
+            call bootstrap-vcpkg.bat -disableMetrics
+          )
+          C:\vcpkg\vcpkg.exe --version
+        timeout-minutes: 10
 
-      - name: "Install vcpkg dependencies (driven by rustdesk vcpkg.json: libvpx libyuv opus aom ffmpeg mfx-dispatch)"
+      - name: Install vcpkg dependencies (manifest mode from rustdesk/vcpkg.json)
+        shell: cmd
         env:
           VCPKG_ROOT: C:\vcpkg
-        shell: bash
+          VCPKG_DEFAULT_HOST_TRIPLET: x64-windows-static
         run: |
-          cd "$GITHUB_WORKSPACE/rustdesk"
-          if ! "$VCPKG_ROOT/vcpkg" install --triplet=x64-windows-static --x-install-root="$VCPKG_ROOT/installed"; then
-            echo "vcpkg install failed, dumping build logs:"
-            find "$VCPKG_ROOT" -name "*.log" | while read -r log; do
-              echo "===== $log ====="
-              tail -n 50 "$log"
-              echo ""
-            done
-            exit 1
-          fi
-        timeout-minutes: 60
+          cd /d %GITHUB_WORKSPACE%\rustdesk
+          echo === vcpkg install (host=TARGET=x64-windows-static, manifest mode) ===
+          C:\vcpkg\vcpkg.exe install --triplet=x64-windows-static --x-install-root=C:\vcpkg\installed
+          if errorlevel 1 (
+            echo ##[error]vcpkg install failed
+            exit /b 1
+          )
+          REM Sanity check: ffmpeg headers must be present in the target triplet dir
+          if not exist C:\vcpkg\installed\x64-windows-static\include\libavutil\attributes.h (
+            echo ##[error]FATAL: ffmpeg headers missing at C:\vcpkg\installed\x64-windows-static\include\libavutil\attributes.h
+            echo installed triplets:
+            dir C:\vcpkg\installed\
+            exit /b 1
+          )
+          echo === vcpkg install OK, ffmpeg headers verified ===
+        timeout-minutes: 90
 
       - name: Install flutter_rust_bridge_codegen
         shell: cmd
@@ -88,25 +105,24 @@ jobs:
           set PATH=%USERPROFILE%\.cargo\bin;%PATH%
           flutter_rust_bridge_codegen --rust-input ../src/flutter_ffi.rs --dart-output ./lib/generated_bridge.dart --c-output ./windows/runner/bridge_generated.h
 
-      - name: Build RustDesk (portable + flutter + hwcodec + vram, full hardware encode)
+      - name: Build RustDesk (portable + flutter + hwcodec + vram)
         shell: cmd
         env:
           VCPKG_ROOT: C:\vcpkg
         run: |
           cd /d %GITHUB_WORKSPACE%\rustdesk
-          REM --skip-portable-pack: we do the final single-file pack in a later step via libs/portable/generate.py (data.bin is still generated in flutter build output).
+          echo === Starting cargo build ===
           python build.py --portable --flutter --hwcodec --vram --skip-portable-pack
           if errorlevel 1 (
             echo ##[error]build.py failed
             exit /b 1
           )
-          REM Move flutter output to ./rustdesk/ (matches official workflow layout)
-          if exist flutter\build\windows\x64\runner\Release (
-            move /Y flutter\build\windows\x64\runner\Release rustdesk
-          ) else (
+          if not exist flutter\build\windows\x64\runner\Release (
             echo ##[error]flutter Release dir not found
+            dir flutter\build\windows\x64\runner\
             exit /b 1
           )
+          move /Y flutter\build\windows\x64\runner\Release rustdesk
         timeout-minutes: 120
 
       - name: Download usbmmidd driver
@@ -134,11 +150,10 @@ jobs:
           del rustdesk_printer_driver.zip printer_driver_adapter.zip
         timeout-minutes: 5
 
-      - name: Build self-extracting single-file portable (rustdesk-1.4.9-x86_64.exe)
+      - name: Build self-extracting single-file portable
         shell: cmd
         run: |
           cd /d %GITHUB_WORKSPACE%\rustdesk
-          REM Strip dpiAware from manifest (matches official workflow)
           sed -i '/dpiAware/d' res\manifest.xml
           cd /d rustdesk\libs\portable
           pip install -r requirements.txt
@@ -164,7 +179,7 @@ jobs:
           path: output/rustdesk-1.4.9-x86_64.exe
           if-no-files-found: error
 
-      - name: Upload full release folder (backup, contains data.bin etc)
+      - name: Upload full release folder
         uses: actions/upload-artifact@v4
         with:
           name: rustdesk-windows-release-folder
