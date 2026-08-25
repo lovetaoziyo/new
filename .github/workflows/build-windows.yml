@@ -119,10 +119,26 @@ jobs:
           echo === librustdesk.dll ===
           dir target\release\librustdesk.dll
 
-      - name: Upload installer artifact (flutter output)
+      - name: Package as NSIS installer
+        shell: cmd
+        run: |
+          cd /d %GITHUB_WORKSPACE%
+          REM Copy NSIS script into Release folder so File /r "Release\*.*" picks up everything
+          copy /Y installer\installer.nsi rustdesk\flutter\build\windows\x64\runner\Release\installer.nsi
+          cd /d rustdesk\flutter\build\windows\x64\runner\Release
+          REM Use the preinstalled NSIS on the runner
+          "C:\Program Files (x86)\NSIS\makensis.exe" /V2 installer.nsi
+          if not exist rustdesk-1.4.9-install.exe (
+            echo ##[error]NSIS build failed
+            exit /b 1
+          )
+          move /Y rustdesk-1.4.9-install.exe %GITHUB_WORKSPACE%\rustdesk-1.4.9-install.exe
+          dir %GITHUB_WORKSPACE%\rustdesk-1.4.9-install.exe
+        timeout-minutes: 10
+
+      - name: Upload installer artifact
         uses: actions/upload-artifact@v4
         with:
-          name: rustdesk-windows-portable
-          path: |
-            rustdesk/flutter/build/windows/x64/runner/Release/
+          name: rustdesk-windows-installer
+          path: rustdesk-1.4.9-install.exe
           if-no-files-found: error
