@@ -57,11 +57,10 @@ jobs:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           architecture: x64
 
-      - name: Install vcpkg and dependencies (no ffmpeg/hwcodec)
+      - name: Install vcpkg and dependencies (no ffmpeg/hwcodec, aom from upstream)
         shell: cmd
         env:
           VCPKG_DEFAULT_HOST_TRIPLET: x64-windows-static
-          USE_AOM_391: "1"
         run: |
           if not exist C:\vcpkg (
             git clone --depth=1 https://github.com/microsoft/vcpkg C:\vcpkg
@@ -69,8 +68,8 @@ jobs:
           cd /d C:\vcpkg
           if not exist vcpkg.exe call bootstrap-vcpkg.bat -disableMetrics
           cd /d %GITHUB_WORKSPACE%\rustdesk
-          REM --classic forces non-manifest mode so we can pick our own packages (skips ffmpeg)
-          vcpkg install --classic --triplet=x64-windows-static --overlay-ports=res/vcpkg libvpx:x64-windows-static libyuv:x64-windows-static opus:x64-windows-static aom:x64-windows-static
+          REM libvpx and libyuv need RustDesk overlay; opus and aom use upstream vcpkg (RustDesk aom overlay is broken on cmake 4.x)
+          vcpkg install --classic --triplet=x64-windows-static --overlay-ports=res/vcpkg/libvpx --overlay-ports=res/vcpkg/libyuv libvpx:x64-windows-static libyuv:x64-windows-static opus:x64-windows-static aom:x64-windows-static
           if errorlevel 1 (
             echo ##[error]vcpkg install failed
             exit /b 1
