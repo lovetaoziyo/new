@@ -6,168 +6,121 @@ on:
     branches:
       - main
 
+env:
+  LLVM_VERSION: "15.0.6"
+  FLUTTER_VERSION: "3.24.5"
+  VCPKG_COMMIT_ID: "120deac3062162151622ca4860575a33844ba10b"
+  SCITER_RUST_VERSION: "1.75.0"
+  VCPKG_DEFAULT_HOST_TRIPLET: x64-windows-static
+
 jobs:
   build-windows:
     runs-on: windows-2022
     timeout-minutes: 360
 
-    env:
-      RUST_VERSION: "1.75.0"
-      LLVM_VERSION: "15.0.6"
-      FLUTTER_VERSION: "3.24.5"
-      VCPKG_ROOT: C:\vcpkg
-      VCPKG_DEFAULT_HOST_TRIPLET: x64-windows-static
-
     steps:
-      - name: Checkout source code (with submodules)
+      - name: Checkout source code
         uses: actions/checkout@v4
         with:
           submodules: recursive
-          fetch-depth: 1
 
-      - name: Install LLVM
+      - name: Install LLVM and Clang
         uses: KyleMayes/install-llvm-action@v2.0.9
         with:
           version: ${{ env.LLVM_VERSION }}
 
-      - name: Install Rust (with rustfmt for frb)
-        uses: dtolnay/rust-toolchain@1.75.0
+      - name: Install flutter
+        uses: subosito/flutter-action@v2
         with:
-          components: rustfmt
+          channel: "stable"
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+
+      - name: Replace engine with rustdesk custom flutter engine
+        shell: pwsh
+        run: |
+          flutter precache --windows
+          Invoke-WebRequest -Uri https://github.com/rustdesk/engine/releases/download/main/windows-x64-release.zip -OutFile windows-x64-release.zip
+          Expand-Archive -Path windows-x64-release.zip -DestinationPath windows-x64-release
+          Move-Item -Force windows-x64-release/* C:/hostedtoolcache/windows/flutter/stable-${{ env.FLUTTER_VERSION }}-x64/bin/cache/artifacts/engine/windows-x64-release/
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ env.SCITER_RUST_VERSION }}
+          targets: x86_64-pc-windows-msvc
+          components: "rustfmt"
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+
+      - name: Setup vcpkg with binary cache (rustdesk-pinned commit)
+        uses: lukka/run-vcpkg@v11
         with:
-          cache-on-failure: true
-          workspaces: rustdesk -> target
+          vcpkgDirectory: C:\vcpkg
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
+          doNotCache: false
 
-      - name: Install Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          channel: stable
-          flutter-version: ${{ env.FLUTTER_VERSION }}
-          architecture: x64
-
-      - name: Bootstrap vcpkg at rustdesk-pinned commit
-        shell: cmd
-        run: |
-          if not exist C:\vcpkg\vcpkg.exe (
-            if not exist C:\vcpkg (
-              git clone https://github.com/microsoft/vcpkg C:\vcpkg
-            )
-            cd /d C:\vcpkg
-            REM Pin to the exact commit rustdesk CI uses (2025.08.27 baseline, cmake 3.x compatible).
-            REM Latest vcpkg requires cmake 4.4.0 which breaks aom 3.11.0 from the 2024 baseline.
-            git checkout 120deac3062162151622ca4860575a33844ba10b
-            call bootstrap-vcpkg.bat -disableMetrics
-          )
-          C:\vcpkg\vcpkg.exe --version
-        timeout-minutes: 15
-
-      - name: vcpkg install
-        shell: cmd
+      - name: Install vcpkg dependencies
         env:
-          VCPKG_ROOT: C:\vcpkg
-          VCPKG_DEFAULT_HOST_TRIPLET: x64-windows-static
+          VCPKG_DEFAULT_HOST_TRIPLET: ${{ env.VCPKG_DEFAULT_HOST_TRIPLET }}
+        shell: bash
         run: |
-          cd /d %GITHUB_WORKSPACE%\rustdesk
-          echo === vcpkg install ===
-          C:\vcpkg\vcpkg.exe install --triplet=x64-windows-static --x-install-root=C:\vcpkg\installed
-        timeout-minutes: 90
-
-      - name: Verify ffmpeg headers
-        shell: cmd
-        run: |
-          if not exist C:\vcpkg\installed\x64-windows-static\include\libavutil\attributes.h goto :no_ffmpeg
-          echo === ffmpeg headers OK ===
-          exit /b 0
-          :no_ffmpeg
-          echo ##[error]FATAL ffmpeg headers missing
-          dir C:\vcpkg\installed\
-          if exist C:\vcpkg\installed\x64-windows-static\include dir C:\vcpkg\installed\x64-windows-static\include
-          exit /b 1
+          $VCPKG_ROOT/vcpkg install --triplet ${{ env.VCPKG_DEFAULT_HOST_TRIPLET }} --x-install-root="$VCPKG_ROOT/installed"
 
       - name: Install flutter_rust_bridge_codegen
-        shell: cmd
+        shell: pwsh
         run: |
-          cd /d %GITHUB_WORKSPACE%\rustdesk
           cargo install flutter_rust_bridge_codegen --version 1.80.1 --features uuid --locked
 
-      - name: Fetch Flutter dependencies
-        shell: cmd
+      - name: Generate bridge code
+        shell: pwsh
         run: |
-          cd /d %GITHUB_WORKSPACE%\rustdesk\flutter
+          Pop-Location
+          Set-Location flutter
           flutter pub get
+          Pop-Location
+          ~/.cargo/bin/flutter_rust_bridge_codegen --rust-input ./src/flutter_ffi.rs --dart-output ./flutter/lib/generated_bridge.dart
 
-      - name: Generate flutter_rust_bridge code
-        shell: cmd
+      - name: Build rustdesk
+        shell: pwsh
         run: |
-          cd /d %GITHUB_WORKSPACE%\rustdesk\flutter
-          set PATH=%USERPROFILE%\.cargo\bin;%PATH%
-          flutter_rust_bridge_codegen --rust-input ../src/flutter_ffi.rs --dart-output ./lib/generated_bridge.dart --c-output ./windows/runner/bridge_generated.h
+          python3 .\build.py --portable --hwcodec --flutter --vram --skip-portable-pack
+          if (-not (Test-Path ./flutter/build/windows/x64/runner/Release)) {
+            Write-Error "flutter Release dir not found"
+            exit 1
+          }
+          Move-Item -Force ./flutter/build/windows/x64/runner/Release ./rustdesk
+          
+          # Download usbmmidd
+          Invoke-WebRequest -Uri https://github.com/rustdesk-org/rdev/releases/download/usbmmidd_v2/usbmmidd_v2.zip -OutFile usbmmidd_v2.zip
+          Expand-Archive usbmmidd_v2.zip -DestinationPath .
+          Remove-Item -Path usbmmidd_v2\Win32 -Recurse
+          Remove-Item -Path "usbmmidd_v2\deviceinstaller64.exe", "usbmmidd_v2\deviceinstaller.exe", "usbmmidd_v2\usbmmidd.bat"
+          Move-Item -Force .\usbmmidd_v2 ./rustdesk
+          
+          # Download printer drivers
+          Invoke-WebRequest -Uri https://github.com/rustdesk/hbb_common/releases/download/driver/rustdesk_printer_driver_v4-1.4.zip -OutFile rustdesk_printer_driver_v4-1.4.zip
+          Expand-Archive rustdesk_printer_driver_v4-1.4.zip -DestinationPath .
+          Rename-Item rustdesk_printer_driver_v4-1.4 drivers_temp
+          Invoke-WebRequest -Uri https://github.com/rustdesk/hbb_common/releases/download/driver/printer_driver_adapter.zip -OutFile printer_driver_adapter.zip
+          Expand-Archive printer_driver_adapter.zip -DestinationPath .
+          New-Item -ItemType Directory -Force -Path ./rustdesk/drivers | Out-Null
+          Move-Item -Force ./drivers_temp ./rustdesk/drivers/RustDeskPrinterDriver
+          Move-Item -Force ./printer_driver_adapter.dll ./rustdesk/
+          Remove-Item rustdesk_printer_driver_v4-1.4.zip, printer_driver_adapter.zip, drivers_temp -ErrorAction SilentlyContinue
 
-      - name: Build RustDesk
-        shell: cmd
-        env:
-          VCPKG_ROOT: C:\vcpkg
+      - name: Build self-extracting portable (.exe)
+        shell: pwsh
         run: |
-          cd /d %GITHUB_WORKSPACE%\rustdesk
-          echo === cargo build start ===
-          python build.py --portable --flutter --hwcodec --vram --skip-portable-pack
-          if not exist flutter\build\windows\x64\runner\Release goto :no_release
-          move /Y flutter\build\windows\x64\runner\Release rustdesk
-          exit /b 0
-          :no_release
-          echo ##[error]flutter Release dir not found
-          if exist flutter\build\windows\x64\runner dir flutter\build\windows\x64\runner
-          exit /b 1
-        timeout-minutes: 120
-
-      - name: Download usbmmidd driver
-        shell: cmd
-        run: |
-          cd /d %GITHUB_WORKSPACE%\rustdesk\rustdesk
-          curl -L -o usbmmidd_v2.zip https://github.com/rustdesk-org/rdev/releases/download/usbmmidd_v2/usbmmidd_v2.zip
-          powershell -Command "Expand-Archive usbmmidd_v2.zip -DestinationPath ."
-          powershell -Command "Remove-Item -Recurse -Force usbmmidd\Win32"
-          powershell -Command "Remove-Item usbmmidd\deviceinstaller64.exe, usbmmidd\deviceinstaller.exe, usbmmidd\usbmmidd.bat"
-          move /Y usbmmidd .
-
-      - name: Download printer drivers
-        shell: cmd
-        run: |
-          cd /d %GITHUB_WORKSPACE%\rustdesk\rustdesk
-          curl -L -o rustdesk_printer_driver.zip https://github.com/rustdesk/hbb_common/releases/download/driver/rustdesk_printer_driver_v4-1.4.zip
-          curl -L -o printer_driver_adapter.zip https://github.com/rustdesk/hbb_common/releases/download/driver/printer_driver_adapter.zip
-          mkdir drivers
-          powershell -Command "Expand-Archive rustdesk_printer_driver.zip -DestinationPath ."
-          powershell -Command "Expand-Archive printer_driver_adapter.zip -DestinationPath ."
-          move /Y rustdesk_printer_driver_v4-1.4 drivers\RustDeskPrinterDriver
-          move /Y printer_driver_adapter.dll .
-          del rustdesk_printer_driver.zip printer_driver_adapter.zip
-
-      - name: Build self-extracting single-file portable
-        shell: cmd
-        run: |
-          cd /d %GITHUB_WORKSPACE%\rustdesk
-          sed -i '/dpiAware/d' res\manifest.xml
-          cd /d rustdesk\libs\portable
+          Set-Location ./libs/portable
           pip install -r requirements.txt
-          python generate.py -f ..\..\rustdesk\ -o . -e ..\..\rustdesk\rustdesk.exe
-          if not exist target\release\rustdesk-portable-packer.exe goto :no_packer
-          mkdir %GITHUB_WORKSPACE%\output
-          move /Y target\release\rustdesk-portable-packer.exe %GITHUB_WORKSPACE%\output\rustdesk-1.4.9-x86_64.exe
-          exit /b 0
-          :no_packer
-          echo ##[error]Portable packer build failed
-          exit /b 1
-        timeout-minutes: 15
-
-      - name: Verify output
-        shell: cmd
-        run: |
-          dir %GITHUB_WORKSPACE%\output
-          dir %GITHUB_WORKSPACE%\rustdesk\rustdesk\rustdesk.exe
+          python3 ./generate.py -f ../../rustdesk/ -o . -e ../../rustdesk/rustdesk.exe
+          if (-not (Test-Path ./target/release/rustdesk-portable-packer.exe)) {
+            Write-Error "Portable packer build failed"
+            exit 1
+          }
+          New-Item -ItemType Directory -Force -Path ../../output | Out-Null
+          Copy-Item -Force ./target/release/rustdesk-portable-packer.exe ../../output/rustdesk-1.4.9-x86_64.exe
 
       - name: Upload single-file portable
         uses: actions/upload-artifact@v4
@@ -176,9 +129,9 @@ jobs:
           path: output/rustdesk-1.4.9-x86_64.exe
           if-no-files-found: error
 
-      - name: Upload full release folder
+      - name: Upload full release folder (backup)
         uses: actions/upload-artifact@v4
         with:
           name: rustdesk-windows-release-folder
-          path: rustdesk/rustdesk/
+          path: rustdesk/
           if-no-files-found: error
