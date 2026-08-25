@@ -89,9 +89,9 @@ jobs:
           VCPKG_ROOT: C:\vcpkg
         run: |
           cd /d %GITHUB_WORKSPACE%\rustdesk
-          REM Official command from rustdesk/flutter-build.yml: --portable --flutter --skip-portable-pack --hwcodec --vram
-          REM --skip-portable-pack: build the flutter output but skip the single-file pack (we do that in a later step with libs/portable)
-          python build.py --portable --flutter --skip-portable-pack --hwcodec --vram
+          REM Official command from rustdesk/flutter-build.yml: --portable --flutter --hwcodec --vram
+          REM Do NOT add --skip-portable-pack: it skips data.bin generation, which bundles the Flutter assets (without it the UI buttons render as blank).
+          python build.py --portable --flutter --hwcodec --vram
           if not exist flutter\build\windows\x64\runner\Release\rustdesk.exe (
             echo ##[error]Build failed - rustdesk.exe not found
             exit /b 1
