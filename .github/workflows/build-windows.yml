@@ -17,6 +17,9 @@ jobs:
   build-windows:
     runs-on: windows-2022
     timeout-minutes: 360
+    defaults:
+      run:
+        working-directory: rustdesk
 
     steps:
       - name: Checkout source code
@@ -52,12 +55,6 @@ jobs:
           targets: x86_64-pc-windows-msvc
           components: "rustfmt"
 
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
-          workspaces: rustdesk -> target
-
       - name: Setup vcpkg with binary cache (rustdesk-pinned commit)
         uses: lukka/run-vcpkg@v11
         with:
@@ -70,7 +67,6 @@ jobs:
           VCPKG_DEFAULT_HOST_TRIPLET: ${{ env.VCPKG_DEFAULT_HOST_TRIPLET }}
         shell: bash
         run: |
-          cd "$GITHUB_WORKSPACE/rustdesk"
           $VCPKG_ROOT/vcpkg install --triplet=x64-windows-static --x-install-root="$VCPKG_ROOT/installed"
 
       - name: Install flutter_rust_bridge_codegen
@@ -81,18 +77,15 @@ jobs:
       - name: Generate bridge code
         shell: pwsh
         run: |
-          Pop-Location
-          Set-Location rustdesk\flutter
+          Set-Location flutter
           flutter pub get
-          Pop-Location
-          Set-Location rustdesk
+          Set-Location ..
           $exe = Join-Path $env:USERPROFILE ".cargo\bin\flutter_rust_bridge_codegen.exe"
           & $exe --rust-input ./src/flutter_ffi.rs --dart-output ./flutter/lib/generated_bridge.dart
 
       - name: Build rustdesk
         shell: pwsh
         run: |
-          Set-Location rustdesk
           python build.py --portable --hwcodec --flutter --vram --skip-portable-pack
           if (-not (Test-Path ./flutter/build/windows/x64/runner/Release)) {
             Write-Error "flutter Release dir not found"
@@ -104,7 +97,7 @@ jobs:
       - name: Download usbmmidd driver
         shell: pwsh
         run: |
-          Set-Location rustdesk\rustdesk
+          Set-Location rustdesk
           Invoke-WebRequest -Uri https://github.com/rustdesk-org/rdev/releases/download/usbmmidd_v2/usbmmidd_v2.zip -OutFile usbmmidd_v2.zip
           Expand-Archive usbmmidd_v2.zip -DestinationPath .
           Remove-Item -Path usbmmidd_v2\Win32 -Recurse
@@ -114,7 +107,7 @@ jobs:
       - name: Download printer drivers
         shell: pwsh
         run: |
-          Set-Location rustdesk\rustdesk
+          Set-Location rustdesk
           Invoke-WebRequest -Uri https://github.com/rustdesk/hbb_common/releases/download/driver/rustdesk_printer_driver_v4-1.4.zip -OutFile rustdesk_printer_driver_v4-1.4.zip
           Invoke-WebRequest -Uri https://github.com/rustdesk/hbb_common/releases/download/driver/printer_driver_adapter.zip -OutFile printer_driver_adapter.zip
           New-Item -ItemType Directory -Force -Path .\drivers | Out-Null
@@ -128,15 +121,16 @@ jobs:
       - name: Build self-extracting portable (.exe)
         shell: pwsh
         run: |
-          Set-Location rustdesk\libs\portable
+          Set-Location libs\portable
           pip install -r requirements.txt
           python generate.py -f ..\..\rustdesk\ -o . -e ..\..\rustdesk\rustdesk.exe
           if (-not (Test-Path ./target/release/rustdesk-portable-packer.exe)) {
             Write-Error "Portable packer build failed"
             exit 1
           }
-          New-Item -ItemType Directory -Force -Path ..\..\..\output | Out-Null
-          Copy-Item -Force ./target/release/rustdesk-portable-packer.exe ..\..\..\output\rustdesk-1.4.9-x86_64.exe
+          Set-Location ..\..
+          New-Item -ItemType Directory -Force -Path output | Out-Null
+          Copy-Item -Force ./libs/portable/target/release/rustdesk-portable-packer.exe ./output/rustdesk-1.4.9-x86_64.exe
 
       - name: Upload single-file portable
         uses: actions/upload-artifact@v4
