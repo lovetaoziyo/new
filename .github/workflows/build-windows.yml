@@ -97,7 +97,6 @@ jobs:
       - name: Download usbmmidd driver
         shell: pwsh
         run: |
-          Set-Location rustdesk
           Invoke-WebRequest -Uri https://github.com/rustdesk-org/rdev/releases/download/usbmmidd_v2/usbmmidd_v2.zip -OutFile usbmmidd_v2.zip
           Expand-Archive usbmmidd_v2.zip -DestinationPath .
           Remove-Item -Path usbmmidd_v2\Win32 -Recurse
@@ -107,7 +106,6 @@ jobs:
       - name: Download printer drivers
         shell: pwsh
         run: |
-          Set-Location rustdesk
           Invoke-WebRequest -Uri https://github.com/rustdesk/hbb_common/releases/download/driver/rustdesk_printer_driver_v4-1.4.zip -OutFile rustdesk_printer_driver_v4-1.4.zip
           Invoke-WebRequest -Uri https://github.com/rustdesk/hbb_common/releases/download/driver/printer_driver_adapter.zip -OutFile printer_driver_adapter.zip
           New-Item -ItemType Directory -Force -Path .\drivers | Out-Null
